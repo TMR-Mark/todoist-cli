@@ -35,6 +35,7 @@ VERSION:
 
 COMMANDS:
      list, l                  Show all tasks
+   inbox                    Show tasks in the Inbox project
      show                     Show task detail
      completed-list, c-l, cl  Show all completed tasks (only premium users)
      add, a                   Add task
