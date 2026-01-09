@@ -36,9 +36,9 @@ custom_theme = Theme({
     "danger":  f"bold {TODOIST['red']}",
     "warning": "yellow",
     "title":   f"bold {TODOIST['white']} on {TODOIST['red']}",
-    "header":  f"bold {TODOIST['red']}",
+    "header":  f"bold {TODOIST['white']} on {TODOIST['red']}",
     "border":  TODOIST["red"],
-    "text":    TODOIST["white"],
+    "text":    "#FFFFFF",
     "dim":     TODOIST["gray"],
 })
 console = Console(theme=custom_theme)
@@ -63,6 +63,7 @@ KNOWN_COMMANDS = {
     "open",
     "up",
     "upcoming",
+    "help",
 }
 
 
@@ -399,22 +400,68 @@ def cmd_list(args: argparse.Namespace) -> None:
         params["project_id"] = args.project
     if args.label:
         params["label_id"] = args.label
-    if args.filter:
-        params["filter"] = args.filter
-    data = _fetch_tasks(params, args.token)
-    if data is None:
+    # Group tasks by due date and discard undated tasks.
+    groups = _group_tasks_by_due_date(data)
+    groups.pop(None, None)
+    if not groups:
+        console.print("[warning]No upcoming tasks with a due date found.[/warning]")
         return
-    _print_tasks(data, title="Todoist Tasks")
 
+    ordered_dates = sorted(groups.keys())
 
-def cmd_show(args: argparse.Namespace) -> None:
-    task_id = args.task_id
-    if not task_id:
-        console.print("[danger]Usage: tod show <task-id>[/danger]")
-        return
-    try:
-        response = requests.get(
-            f"{DEFAULT_BASE_URL}/tasks/{task_id}",
+    table = Table(
+        title="Upcoming Tasks",
+        box=box.HEAVY_EDGE,
+        show_header=True,
+        header_style="header",
+        border_style="border",
+        title_style="title",
+    )
+    table.add_column("#", style="bold yellow", width=4, justify="right")
+    table.add_column("Date", style="info", width=12)
+    table.add_column("ID", style="info", width=10)
+    table.add_column("Content", style="text", overflow="fold")
+    table.add_column("Project", style="info", width=18)
+    table.add_column("Due", style="dim", no_wrap=True)
+    table.add_column("Priority", justify="center", width=9, style="warning")
+
+    row_idx = 0
+    for i, due_key in enumerate(ordered_dates):
+        entries = groups[due_key]
+        entries.sort(key=_due_sort_value)
+        date_label = _format_date(due_key)
+        is_last_group = i == len(ordered_dates) - 1
+
+        for j, task in enumerate(entries):
+            row_idx += 1
+            due = task.get("due") or {}
+            due_str = due.get("string") or _format_date(due.get("date"))
+            due_time = _format_time(due.get("datetime")) if due.get("datetime") else ""
+            if due_time:
+                if due_str:
+                    if not _due_string_has_time(due_str):
+                        due_display = f"{due_str} {due_time}".strip()
+                    elif ":" in due_str:
+                        due_display = due_str
+                    else:
+                        due_display = due_time
+                else:
+                    due_display = due_time
+            else:
+                due_display = due_str
+
+            table.add_row(
+                str(row_idx),
+                date_label,
+                str(task.get("id", "")),
+                Text(str(task.get("content", ""))),
+                _get_project_name(task.get("project_id")),
+                due_display,
+                str(task.get("priority", "")),
+                end_section=(j == len(entries) - 1 and not is_last_group),
+            )
+
+    console.print(table)
             headers=_get_headers(args.token),
             timeout=10,
         )
