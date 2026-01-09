@@ -224,14 +224,7 @@ def _normalize_token(token: Optional[str]) -> Optional[str]:
 
 
 def _find_api_token() -> Optional[str]:
-    for var in TOKEN_ENV_VARS:
-        token = _normalize_token(os.getenv(var))
-        if token:
-            return token
-
-    token = _wcm_read_token()
-    if token:
-        return token
+    return _wcm_read_token()
 
     candidates = [Path.cwd(), SCRIPT_DIR, Path.home()]
     for base in candidates:
@@ -259,7 +252,7 @@ def _get_headers(token: Optional[str] = None) -> dict:
     resolved = _normalize_token(token) or _find_api_token()
     if not resolved:
         console.print(
-            "[danger]Missing Todoist API token. Set TODOIST_API_TOKEN or store it in .todoist_token/.env.[/danger]"
+            "[danger]Missing Todoist API token. Store it in Windows Credential Manager via `tod token set`.[/danger]"
         )
         sys.exit(1)
     return {
