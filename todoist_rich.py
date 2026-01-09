@@ -4,7 +4,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -51,6 +51,7 @@ TOKEN_FILE_CANDIDATES = [
     "todoist_token.txt",
     ".todoist_api_key",
 ]
+PROJECT_CACHE: Dict[int, str] = {}
 
 
 def _wcm_target_name() -> str:
@@ -298,6 +299,34 @@ def _handle_response(response: requests.Response) -> Optional[dict]:
         return None
 
 
+def _get_project_name(project_id: Optional[int]) -> str:
+    if not project_id:
+        return "-"
+    if project_id in PROJECT_CACHE:
+        return PROJECT_CACHE[project_id]
+
+    try:
+        response = requests.get(
+            f"{DEFAULT_BASE_URL}/projects",
+            headers=_get_headers(),
+            timeout=10,
+        )
+    except Exception:
+        return str(project_id)
+
+    projects = _handle_response(response)
+    if not projects:
+        return str(project_id)
+
+    for project in projects:
+        pid = project.get("id")
+        name = project.get("name") or ""
+        if pid:
+            PROJECT_CACHE[pid] = name
+
+    return PROJECT_CACHE.get(project_id, str(project_id))
+
+
 def _print_tasks(tasks: list[dict], title: str = "Tasks") -> None:
     if not tasks:
         console.print(f"[warning]No {title.lower()} found.[/warning]")
@@ -319,7 +348,8 @@ def _print_tasks(tasks: list[dict], title: str = "Tasks") -> None:
     table.add_column("Priority", justify="center", width=9, style="warning")
 
     for idx, task in enumerate(tasks, 1):
-        project = task.get("project_id") or "-"
+        project = task.get("project_id")
+        project_name = _get_project_name(project)
         due = task.get("due") or {}
         due_str = due.get("string") or _format_date(due.get("date"))
         due_time = _format_time(due.get("datetime")) if due.get("datetime") else ""
@@ -329,7 +359,7 @@ def _print_tasks(tasks: list[dict], title: str = "Tasks") -> None:
             str(idx),
             str(task.get("id")),
             content,
-            str(project),
+            project_name,
             due_display,
             str(task.get("priority", 1)),
         )
