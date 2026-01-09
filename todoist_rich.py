@@ -296,9 +296,16 @@ def cmd_projects(_: argparse.Namespace) -> None:
     projects = _handle_response(response)
     if not projects:
         return
-    table = Table(title="Projects", title_style="title", box=None)
-    table.add_column("ID", style="info", width=8)
-    table.add_column("Name", style="")
+    table = Table(
+        title="Projects",
+        title_style="title",
+        box=BOX_STYLE,
+        show_header=True,
+        header_style="header",
+        border_style="border",
+    )
+    table.add_column("ID", style="info", width=8, justify="right")
+    table.add_column("Name", style="text")
     for project in projects:
         table.add_row(str(project.get("id")), project.get("name", ""))
     console.print(table)
@@ -317,9 +324,16 @@ def cmd_labels(_: argparse.Namespace) -> None:
     labels = _handle_response(response)
     if not labels:
         return
-    table = Table(title="Labels", title_style="title", box=None)
-    table.add_column("ID", style="info", width=8)
-    table.add_column("Name", style="")
+    table = Table(
+        title="Labels",
+        title_style="title",
+        box=BOX_STYLE,
+        show_header=True,
+        header_style="header",
+        border_style="border",
+    )
+    table.add_column("ID", style="info", width=8, justify="right")
+    table.add_column("Name", style="text")
     for label in labels:
         table.add_row(str(label.get("id")), label.get("name", ""))
     console.print(table)
