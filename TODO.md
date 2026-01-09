@@ -9,6 +9,7 @@ This file tracks next steps for the Todoist CLI work in this folder.
 | 1 | 2026-01-08 00:00 | 2026-01-08 00:00 | Backlog | P0 | Make git repo | Initialize this folder as a git repository with meaningful history so code can be tracked.
 | 2 | 2026-01-08 00:00 | 2026-01-08 00:00 | Backlog | P0 | Push to GitHub | Create a remote repo (probably under TMR-Mark) and push the initial Todoist CLI artifacts.
 | 3 | 2026-01-08 00:00 | 2026-01-08 00:00 | Backlog | P0 | Create Python CLI tool using Beep as reference | Build a CLI mirroring the Beeper tool, including token discovery, list/read/open commands, and Windows shim installation guidance. |
+| 4 | 2026-01-08 00:00 | 2026-01-08 00:00 | Backlog | P1 | Draft README | Capture usage, authentication, and shim installation guidance for the new todoist CLI so it mirrors the documentation style of Beeper. |
 
 ## Done
 

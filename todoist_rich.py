@@ -7,21 +7,41 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+from rich import box
 from rich.console import Console
 from rich.table import Table
 from rich.theme import Theme
+from rich.text import Text
 
 DEFAULT_BASE_URL = os.getenv("TODOIST_API_URL", "https://api.todoist.com/rest/v2")
 TOKEN_ENV_VARS = ["TODOIST_API_TOKEN", "TODOIST_TOKEN"]
 
+DRACULA = {
+    "background": "#282a36",
+    "foreground": "#f8f8f2",
+    "comment": "#6272a4",
+    "cyan": "#8be9fd",
+    "green": "#50fa7b",
+    "orange": "#ffb86c",
+    "pink": "#ff79c6",
+    "purple": "#bd93f9",
+    "red": "#ff5555",
+    "yellow": "#f1fa8c",
+}
+
 custom_theme = Theme({
-    "info": "cyan",
-    "success": "green",
-    "danger": "bold red",
-    "warning": "yellow",
-    "title": "bold magenta",
+    "info": DRACULA["cyan"],
+    "success": DRACULA["green"],
+    "danger": f"bold {DRACULA['red']}",
+    "warning": DRACULA["orange"],
+    "title": f"bold {DRACULA['pink']}",
+    "header": f"bold {DRACULA['purple']}",
+    "border": DRACULA["purple"],
+    "text": DRACULA["foreground"],
+    "dim": DRACULA["comment"],
 })
 console = Console(theme=custom_theme)
+BOX_STYLE = box.HEAVY_EDGE
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 TOKEN_FILE_CANDIDATES = [
@@ -139,23 +159,34 @@ def _print_tasks(tasks: list[dict], title: str = "Tasks") -> None:
         console.print(f"[warning]No {title.lower()} found.[/warning]")
         return
 
-    table = Table(title=title, title_style="title", box=None)
-    table.add_column("ID", style="info", width=8)
-    table.add_column("Content", style="", overflow="fold")
-    table.add_column("Project", style="cyan", width=20)
-    table.add_column("Due", style="magenta", width=16)
-    table.add_column("Priority", style="yellow", width=8)
+    table = Table(
+        title=title,
+        title_style="title",
+        box=BOX_STYLE,
+        show_header=True,
+        header_style="header",
+        border_style="border",
+    )
+    table.add_column("#", justify="right", width=4, style="dim")
+    table.add_column("ID", style="info", width=10)
+    table.add_column("Content", style="text", overflow="fold")
+    table.add_column("Project", style="info", width=20)
+    table.add_column("Due", style="dim", width=18)
+    table.add_column("Priority", justify="center", width=9, style="warning")
 
-    for task in tasks:
+    for idx, task in enumerate(tasks, 1):
         project = task.get("project_id") or "-"
         due = task.get("due") or {}
         due_str = due.get("string") or _format_date(due.get("date"))
         due_time = _format_time(due.get("datetime")) if due.get("datetime") else ""
+        due_display = f"{due_str} {due_time}".strip()
+        content = Text(str(task.get("content", "")))
         table.add_row(
+            str(idx),
             str(task.get("id")),
-            task.get("content", ""),
+            content,
             str(project),
-            f"{due_str} {due_time}".strip(),
+            due_display,
             str(task.get("priority", 1)),
         )
     console.print(table)
