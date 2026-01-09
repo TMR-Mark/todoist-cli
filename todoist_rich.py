@@ -240,27 +240,6 @@ def _normalize_token(token: Optional[str]) -> Optional[str]:
 def _find_api_token() -> Optional[str]:
     return _wcm_read_token()
 
-    candidates = [Path.cwd(), SCRIPT_DIR, Path.home()]
-    for base in candidates:
-        token_path = base / ".env"
-        values = _read_dotenv(token_path)
-        token = _normalize_token(values.get("TODOIST_API_TOKEN"))
-        if token:
-            return token
-
-        for name in TOKEN_FILE_CANDIDATES:
-            file_path = base / name
-            if not file_path.exists():
-                continue
-            try:
-                value = _normalize_token(file_path.read_text(encoding="utf-8", errors="ignore"))
-                if value:
-                    return value
-            except Exception:
-                continue
-
-    return None
-
 
 def _get_headers(token: Optional[str] = None) -> dict:
     resolved = _normalize_token(token) or _find_api_token()
@@ -358,9 +337,9 @@ def _print_tasks(tasks: list[dict], title: str = "Tasks") -> None:
         border_style="border",
     )
     table.add_column("#", justify="right", width=4, style="dim")
-    table.add_column("ID", style="info", width=10)
+    table.add_column("ID", width=10)
     table.add_column("Content", style="text", overflow="fold")
-    table.add_column("Project", style="info", width=20)
+    table.add_column("Project", width=20)
     table.add_column("Due", style="dim", no_wrap=True)
     table.add_column("Priority", justify="center", width=9, style="warning")
 
@@ -400,68 +379,22 @@ def cmd_list(args: argparse.Namespace) -> None:
         params["project_id"] = args.project
     if args.label:
         params["label_id"] = args.label
-    # Group tasks by due date and discard undated tasks.
-    groups = _group_tasks_by_due_date(data)
-    groups.pop(None, None)
-    if not groups:
-        console.print("[warning]No upcoming tasks with a due date found.[/warning]")
+    if args.filter:
+        params["filter"] = args.filter
+    data = _fetch_tasks(params, args.token)
+    if data is None:
         return
+    _print_tasks(data, title="Todoist Tasks")
 
-    ordered_dates = sorted(groups.keys())
 
-    table = Table(
-        title="Upcoming Tasks",
-        box=box.HEAVY_EDGE,
-        show_header=True,
-        header_style="header",
-        border_style="border",
-        title_style="title",
-    )
-    table.add_column("#", style="bold yellow", width=4, justify="right")
-    table.add_column("Date", style="info", width=12)
-    table.add_column("ID", style="info", width=10)
-    table.add_column("Content", style="text", overflow="fold")
-    table.add_column("Project", style="info", width=18)
-    table.add_column("Due", style="dim", no_wrap=True)
-    table.add_column("Priority", justify="center", width=9, style="warning")
-
-    row_idx = 0
-    for i, due_key in enumerate(ordered_dates):
-        entries = groups[due_key]
-        entries.sort(key=_due_sort_value)
-        date_label = _format_date(due_key)
-        is_last_group = i == len(ordered_dates) - 1
-
-        for j, task in enumerate(entries):
-            row_idx += 1
-            due = task.get("due") or {}
-            due_str = due.get("string") or _format_date(due.get("date"))
-            due_time = _format_time(due.get("datetime")) if due.get("datetime") else ""
-            if due_time:
-                if due_str:
-                    if not _due_string_has_time(due_str):
-                        due_display = f"{due_str} {due_time}".strip()
-                    elif ":" in due_str:
-                        due_display = due_str
-                    else:
-                        due_display = due_time
-                else:
-                    due_display = due_time
-            else:
-                due_display = due_str
-
-            table.add_row(
-                str(row_idx),
-                date_label,
-                str(task.get("id", "")),
-                Text(str(task.get("content", ""))),
-                _get_project_name(task.get("project_id")),
-                due_display,
-                str(task.get("priority", "")),
-                end_section=(j == len(entries) - 1 and not is_last_group),
-            )
-
-    console.print(table)
+def cmd_show(args: argparse.Namespace) -> None:
+    task_id = args.task_id
+    if not task_id:
+        console.print("[danger]Usage: tod show <task-id>[/danger]")
+        return
+    try:
+        response = requests.get(
+            f"{DEFAULT_BASE_URL}/tasks/{task_id}",
             headers=_get_headers(args.token),
             timeout=10,
         )
@@ -780,7 +713,7 @@ def cmd_projects(_: argparse.Namespace) -> None:
         header_style="header",
         border_style="border",
     )
-    table.add_column("ID", style="info", width=8, justify="right")
+    table.add_column("ID", width=8, justify="right")
     table.add_column("Name", style="text")
     for project in projects:
         table.add_row(str(project.get("id")), project.get("name", ""))
@@ -808,7 +741,7 @@ def cmd_labels(_: argparse.Namespace) -> None:
         header_style="header",
         border_style="border",
     )
-    table.add_column("ID", style="info", width=8, justify="right")
+    table.add_column("ID", width=8, justify="right")
     table.add_column("Name", style="text")
     for label in labels:
         table.add_row(str(label.get("id")), label.get("name", ""))
@@ -857,9 +790,31 @@ def cmd_token(args: argparse.Namespace) -> None:
     else:
         console.print("[danger]Unknown token command. Use set|clear|status.[/danger]")
 
+def show_help():
+    console.print("\n[title]  Todoist CLI  [/title]\n", justify="center")
+    
+    table = Table(box=box.SIMPLE, show_header=True, header_style="header")
+    table.add_column("Command", style="info", width=15)
+    table.add_column("Description", style="text")
+    
+    table.add_row("list", "Show recent tasks")
+    table.add_row("inbox", "Show tasks in your Inbox")
+    table.add_row("upcoming", "Show upcoming tasks grouped by date")
+    table.add_row("add 'text'", "Quick add a new task")
+    table.add_row("complete id", "Mark a task as finished")
+    table.add_row("projects", "List all projects and their IDs")
+    table.add_row("token set", "Store API token in Windows Credential Manager")
+    
+    console.print(table)
+    
+    console.print("\n[header]Examples:[/]")
+    console.print("  [dim]> [/]tod list")
+    console.print("  [dim]> [/]tod add 'Buy milk tomorrow at 2pm'")
+    console.print("  [dim]> [/]tod complete 123456789\n")
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Todoist CLI (Rich)")
+    parser = argparse.ArgumentParser(description="Todoist CLI (Rich)", add_help=False)
+    parser.add_argument("-h", "--help", action="store_true", dest="help_flag", help="Show help message")
     parser.add_argument("--token", help="Todoist API token (overrides discovery)")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -907,6 +862,8 @@ def main() -> None:
     upcoming_p.set_defaults(func=cmd_upcoming)
     up_p = subparsers.add_parser("up", help="Shortcut for upcoming")
     up_p.set_defaults(func=cmd_upcoming)
+    
+    subparsers.add_parser("help")
 
     raw_args = sys.argv[1:]
     token_parser = argparse.ArgumentParser(add_help=False)
@@ -917,23 +874,25 @@ def main() -> None:
         return
 
     args = parser.parse_args()
-    if not args.command:
-        parser.print_help()
-        return
-    if args.command == "token":
-        cmd_token(args)
-        return
-    if hasattr(args, "func"):
-        try:
+    
+    try:
+        if getattr(args, "help_flag", False) or not args.command or args.command == "help":
+            show_help()
+            return
+        if args.command == "token":
+            cmd_token(args)
+            return
+        if hasattr(args, "func"):
             args.func(args)
-        except SystemExit:
-            raise
-        except Exception as exc:
-            console.print(f"[danger]Unhandled error: {exc}[/danger]")
-    else:
-        parser.print_help()
-
-
+        else:
+            show_help()
+    except KeyboardInterrupt:
+        console.print("\n[warning]Operation cancelled.[/]")
+        sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        console.print(f"[danger]Unhandled error: {exc}[/danger]")
 
 if __name__ == "__main__":
     main()
