@@ -1,7 +1,7 @@
 param(
     [string]$CommandName = "tod",
     [string]$TargetDir = "",
-    [string]$ExeName = "todoist.exe",
+    [string]$ScriptName = "todoist_rich.py",
     [switch]$Force
 )
 
@@ -22,10 +22,10 @@ function Get-FirstWritablePathDir {
     return $null
 }
 
-$repoDir = Split-Path -Parent $PSCommandPath
-$exePath = Join-Path $repoDir $ExeName
-if (-not (Test-Path $exePath)) {
-    throw "Cannot find $ExeName at: $exePath"
+ $repoDir = Split-Path -Parent $PSCommandPath
+ $scriptPath = Join-Path $repoDir $ScriptName
+if (-not (Test-Path $scriptPath)) {
+    throw "Cannot find $ScriptName at: $scriptPath"
 }
 
 if ([string]::IsNullOrWhiteSpace($TargetDir)) {
@@ -49,10 +49,10 @@ if ((Test-Path $shimPath) -and -not $Force) {
 $shim = @"
 @echo off
 setlocal
-"$exePath" %*
+python "$scriptPath" %*
 "@
 
 $shim | Set-Content -Path $shimPath -Encoding Ascii -Force
 
 Write-Host "Installed '$CommandName' shim -> $shimPath" -ForegroundColor Green
-Write-Host "Runs: $exePath" -ForegroundColor DarkGray
+Write-Host "Runs: python $scriptPath" -ForegroundColor DarkGray
