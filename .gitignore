@@ -1,0 +1,4 @@
+todoist.exe
+*.cache.json
+*.config.json
+*.csv
