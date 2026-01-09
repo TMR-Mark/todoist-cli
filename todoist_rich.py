@@ -1,0 +1,344 @@
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import requests
+from rich.console import Console
+from rich.table import Table
+from rich.theme import Theme
+
+DEFAULT_BASE_URL = os.getenv("TODOIST_API_URL", "https://api.todoist.com/rest/v2")
+TOKEN_ENV_VARS = ["TODOIST_API_TOKEN", "TODOIST_TOKEN"]
+
+custom_theme = Theme({
+    "info": "cyan",
+    "success": "green",
+    "danger": "bold red",
+    "warning": "yellow",
+    "title": "bold magenta",
+})
+console = Console(theme=custom_theme)
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+TOKEN_FILE_CANDIDATES = [
+    ".todoist_token",
+    "todoist_token.txt",
+    ".todoist_api_key",
+]
+
+
+def _read_dotenv(path: Path) -> dict:
+    values = {}
+    try:
+        if not path.exists():
+            return values
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            values[key.strip()] = val.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return values
+
+
+def _normalize_token(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    token = token.strip()
+    if token.startswith("Bearer ") or token.startswith("bearer "):
+        token = token.split(" ", 1)[1].strip()
+    return token or None
+
+
+def _find_api_token() -> Optional[str]:
+    for var in TOKEN_ENV_VARS:
+        token = _normalize_token(os.getenv(var))
+        if token:
+            return token
+
+    candidates = [Path.cwd(), SCRIPT_DIR, Path.home()]
+    for base in candidates:
+        token_path = base / ".env"
+        values = _read_dotenv(token_path)
+        token = _normalize_token(values.get("TODOIST_API_TOKEN"))
+        if token:
+            return token
+
+        for name in TOKEN_FILE_CANDIDATES:
+            file_path = base / name
+            if not file_path.exists():
+                continue
+            try:
+                value = _normalize_token(file_path.read_text(encoding="utf-8", errors="ignore"))
+                if value:
+                    return value
+            except Exception:
+                continue
+
+    return None
+
+
+def _get_headers(token: Optional[str] = None) -> dict:
+    resolved = _normalize_token(token) or _find_api_token()
+    if not resolved:
+        console.print(
+            "[danger]Missing Todoist API token. Set TODOIST_API_TOKEN or store it in .todoist_token/.env.[/danger]"
+        )
+        sys.exit(1)
+    return {
+        "Authorization": f"Bearer {resolved}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _format_date(date_str: Optional[str]) -> str:
+    if not date_str:
+        return "----"
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return date_str
+
+
+def _format_time(date_str: Optional[str]) -> str:
+    if not date_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt.strftime("%I:%M %p")
+    except Exception:
+        return ""
+
+
+def _handle_response(response: requests.Response) -> Optional[dict]:
+    try:
+        response.raise_for_status()
+        if response.content:
+            return response.json()
+        return {}
+    except Exception as exc:
+        console.print(f"[danger]API error: {exc}[/danger]")
+        if response.content:
+            try:
+                console.print(response.text)
+            except Exception:
+                pass
+        return None
+
+
+def _print_tasks(tasks: list[dict], title: str = "Tasks") -> None:
+    if not tasks:
+        console.print(f"[warning]No {title.lower()} found.[/warning]")
+        return
+
+    table = Table(title=title, title_style="title", box=None)
+    table.add_column("ID", style="info", width=8)
+    table.add_column("Content", style="", overflow="fold")
+    table.add_column("Project", style="cyan", width=20)
+    table.add_column("Due", style="magenta", width=16)
+    table.add_column("Priority", style="yellow", width=8)
+
+    for task in tasks:
+        project = task.get("project_id") or "-"
+        due = task.get("due") or {}
+        due_str = due.get("string") or _format_date(due.get("date"))
+        due_time = _format_time(due.get("datetime")) if due.get("datetime") else ""
+        table.add_row(
+            str(task.get("id")),
+            task.get("content", ""),
+            str(project),
+            f"{due_str} {due_time}".strip(),
+            str(task.get("priority", 1)),
+        )
+    console.print(table)
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    params = {}
+    if args.project:
+        params["project_id"] = args.project
+    if args.label:
+        params["label_id"] = args.label
+    if args.filter:
+        params["filter"] = args.filter
+    try:
+        response = requests.get(
+            f"{DEFAULT_BASE_URL}/tasks",
+            headers=_get_headers(args.token),
+            params=params,
+            timeout=10,
+        )
+    except Exception as exc:
+        console.print(f"[danger]Could not fetch tasks: {exc}[/danger]")
+        return
+    data = _handle_response(response)
+    if data is None:
+        return
+    _print_tasks(data, title="Todoist Tasks")
+
+
+def cmd_show(args: argparse.Namespace) -> None:
+    task_id = args.task_id
+    if not task_id:
+        console.print("[danger]Usage: tod show <task-id>[/danger]")
+        return
+    try:
+        response = requests.get(
+            f"{DEFAULT_BASE_URL}/tasks/{task_id}",
+            headers=_get_headers(args.token),
+            timeout=10,
+        )
+    except Exception as exc:
+        console.print(f"[danger]Request failed: {exc}[/danger]")
+        return
+    task = _handle_response(response)
+    if not task:
+        return
+    console.print(json.dumps(task, indent=2))
+
+
+def cmd_add(args: argparse.Namespace) -> None:
+    if not args.content:
+        console.print("[danger]Provide task content via --content or positional argument.[/danger]")
+        return
+    body = {"content": args.content}
+    if args.project:
+        body["project_id"] = args.project
+    if args.label:
+        body["label_ids"] = [args.label]
+    if args.due:
+        body["due_string"] = args.due
+    if args.priority:
+        body["priority"] = max(1, min(4, args.priority))
+    try:
+        response = requests.post(
+            f"{DEFAULT_BASE_URL}/tasks",
+            headers=_get_headers(args.token),
+            json=body,
+            timeout=10,
+        )
+    except Exception as exc:
+        console.print(f"[danger]Error creating task: {exc}[/danger]")
+        return
+    task = _handle_response(response)
+    if task:
+        console.print(f"[success]Task created:[/success] {task.get('content')} ([info]{task.get('id')}[/info])")
+
+
+def cmd_complete(args: argparse.Namespace) -> None:
+    if not args.task_id:
+        console.print("[danger]Usage: tod complete <task-id>[/danger]")
+        return
+    try:
+        response = requests.post(
+            f"{DEFAULT_BASE_URL}/tasks/{args.task_id}/close",
+            headers=_get_headers(args.token),
+            timeout=10,
+        )
+    except Exception as exc:
+        console.print(f"[danger]Error closing task: {exc}[/danger]")
+        return
+    if response.status_code == 204:
+        console.print(f"[success]Completed task {args.task_id}.[/success]")
+    else:
+        _handle_response(response)
+
+
+def cmd_projects(_: argparse.Namespace) -> None:
+    try:
+        response = requests.get(
+            f"{DEFAULT_BASE_URL}/projects",
+            headers=_get_headers(),
+            timeout=10,
+        )
+    except Exception as exc:
+        console.print(f"[danger]Error fetching projects: {exc}[/danger]")
+        return
+    projects = _handle_response(response)
+    if not projects:
+        return
+    table = Table(title="Projects", title_style="title", box=None)
+    table.add_column("ID", style="info", width=8)
+    table.add_column("Name", style="")
+    for project in projects:
+        table.add_row(str(project.get("id")), project.get("name", ""))
+    console.print(table)
+
+
+def cmd_labels(_: argparse.Namespace) -> None:
+    try:
+        response = requests.get(
+            f"{DEFAULT_BASE_URL}/labels",
+            headers=_get_headers(),
+            timeout=10,
+        )
+    except Exception as exc:
+        console.print(f"[danger]Error fetching labels: {exc}[/danger]")
+        return
+    labels = _handle_response(response)
+    if not labels:
+        return
+    table = Table(title="Labels", title_style="title", box=None)
+    table.add_column("ID", style="info", width=8)
+    table.add_column("Name", style="")
+    for label in labels:
+        table.add_row(str(label.get("id")), label.get("name", ""))
+    console.print(table)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Todoist CLI (Rich)")
+    parser.add_argument("--token", help="Todoist API token (overrides discovery)")
+    subparsers = parser.add_subparsers(dest="command")
+
+    list_p = subparsers.add_parser("list", help="List tasks")
+    list_p.add_argument("--project", type=int, help="Filter by project ID")
+    list_p.add_argument("--label", type=int, help="Filter by label ID")
+    list_p.add_argument("--filter", help="Todoist filter string (e.g. today)")
+
+    subparsers.add_parser("projects", help="List projects").set_defaults(func=cmd_projects)
+    subparsers.add_parser("labels", help="List labels").set_defaults(func=cmd_labels)
+
+    show_p = subparsers.add_parser("show", help="Show task detail")
+    show_p.add_argument("task_id", help="Task ID")
+    show_p.set_defaults(func=cmd_show)
+
+    add_p = subparsers.add_parser("add", help="Create a task")
+    add_p.add_argument("content", nargs="?", help="Task content")
+    add_p.add_argument("--project", type=int, help="Project ID")
+    add_p.add_argument("--label", type=int, help="Label ID")
+    add_p.add_argument("--due", help="Due string (e.g. tomorrow at 9am)")
+    add_p.add_argument("--priority", type=int, choices=[1, 2, 3, 4], help="Priority (1=low,4=urgent)")
+    add_p.set_defaults(func=cmd_add)
+
+    complete_p = subparsers.add_parser("complete", help="Complete a task")
+    complete_p.add_argument("task_id", help="Task ID")
+    complete_p.set_defaults(func=cmd_complete)
+
+    list_p.set_defaults(func=cmd_list)
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        return
+    if hasattr(args, "func"):
+        try:
+            args.func(args)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            console.print(f"[danger]Unhandled error: {exc}[/danger]")
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
