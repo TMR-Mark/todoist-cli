@@ -5,10 +5,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from rich import box
 from rich.console import Console
+from rich.prompt import Prompt
 from rich.table import Table
 from rich.theme import Theme
 from rich.text import Text
@@ -51,6 +53,151 @@ TOKEN_FILE_CANDIDATES = [
 ]
 
 
+def _wcm_target_name() -> str:
+    try:
+        parsed = urlparse(DEFAULT_BASE_URL)
+        netloc = (parsed.netloc or "api.todoist.com").strip()
+    except Exception:
+        netloc = "api.todoist.com"
+    return f"todoist-cli:{netloc}"
+
+
+def _wcm_read_token() -> Optional[str]:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        CRED_TYPE_GENERIC = 1
+
+        class CREDENTIALW(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wintypes.DWORD),
+                ("Type", wintypes.DWORD),
+                ("TargetName", wintypes.LPWSTR),
+                ("Comment", wintypes.LPWSTR),
+                ("LastWritten", wintypes.FILETIME),
+                ("CredentialBlobSize", wintypes.DWORD),
+                ("CredentialBlob", wintypes.LPBYTE),
+                ("Persist", wintypes.DWORD),
+                ("AttributeCount", wintypes.DWORD),
+                ("Attributes", wintypes.LPVOID),
+                ("TargetAlias", wintypes.LPWSTR),
+                ("UserName", wintypes.LPWSTR),
+            ]
+
+        PCREDENTIALW = ctypes.POINTER(CREDENTIALW)
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        CredReadW = advapi32.CredReadW
+        CredReadW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(PCREDENTIALW)]
+        CredReadW.restype = wintypes.BOOL
+
+        CredFree = advapi32.CredFree
+        CredFree.argtypes = [wintypes.LPVOID]
+        CredFree.restype = None
+
+        pcred = PCREDENTIALW()
+        if not CredReadW(_wcm_target_name(), CRED_TYPE_GENERIC, 0, ctypes.byref(pcred)):
+            return None
+
+        try:
+            cred = pcred.contents
+            if not cred.CredentialBlob or cred.CredentialBlobSize <= 0:
+                return None
+            blob = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+        finally:
+            CredFree(pcred)
+
+        try:
+            return _normalize_token(blob.decode("utf-16-le", errors="replace"))
+        except Exception:
+            return _normalize_token(blob.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def _wcm_write_token(token: str, overwrite: bool = False) -> None:
+    if os.name != "nt":
+        raise RuntimeError("Windows Credential Manager is only available on Windows.")
+
+    token_norm = _normalize_token(token)
+    if not token_norm:
+        raise RuntimeError("Token is empty.")
+
+    existing = _wcm_read_token()
+    if existing and not overwrite:
+        raise RuntimeError("Token already stored. Use --force to overwrite.")
+
+    import ctypes
+    from ctypes import wintypes
+
+    CRED_TYPE_GENERIC = 1
+    CRED_PERSIST_LOCAL_MACHINE = 2
+
+    class CREDENTIALW(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR),
+            ("Comment", wintypes.LPWSTR),
+            ("LastWritten", wintypes.FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", wintypes.LPBYTE),
+            ("Persist", wintypes.DWORD),
+            ("AttributeCount", wintypes.DWORD),
+            ("Attributes", wintypes.LPVOID),
+            ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    CredWriteW = advapi32.CredWriteW
+    CredWriteW.argtypes = [ctypes.POINTER(CREDENTIALW), wintypes.DWORD]
+    CredWriteW.restype = wintypes.BOOL
+
+    blob = token_norm.encode("utf-16-le")
+    blob_buf = ctypes.create_string_buffer(blob, len(blob))
+
+    cred = CREDENTIALW()
+    cred.Flags = 0
+    cred.Type = CRED_TYPE_GENERIC
+    cred.TargetName = ctypes.c_wchar_p(_wcm_target_name())
+    cred.Comment = ctypes.c_wchar_p("Todoist CLI token")
+    cred.CredentialBlobSize = len(blob)
+    cred.CredentialBlob = ctypes.cast(blob_buf, wintypes.LPBYTE)
+    cred.Persist = CRED_PERSIST_LOCAL_MACHINE
+    cred.AttributeCount = 0
+    cred.Attributes = None
+    cred.TargetAlias = None
+    cred.UserName = ctypes.c_wchar_p("todoist-cli")
+
+    if not CredWriteW(ctypes.byref(cred), 0):
+        err = ctypes.get_last_error()
+        raise RuntimeError(f"Failed to write token to Windows Credential Manager (error {err}).")
+
+
+def _wcm_delete_token() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        CRED_TYPE_GENERIC = 1
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        CredDeleteW = advapi32.CredDeleteW
+        CredDeleteW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD]
+        CredDeleteW.restype = wintypes.BOOL
+
+        ok = CredDeleteW(_wcm_target_name(), CRED_TYPE_GENERIC, 0)
+        return bool(ok)
+    except Exception:
+        return False
+
+
 def _read_dotenv(path: Path) -> dict:
     values = {}
     try:
@@ -81,6 +228,10 @@ def _find_api_token() -> Optional[str]:
         token = _normalize_token(os.getenv(var))
         if token:
             return token
+
+    token = _wcm_read_token()
+    if token:
+        return token
 
     candidates = [Path.cwd(), SCRIPT_DIR, Path.home()]
     for base in candidates:
@@ -339,6 +490,37 @@ def cmd_labels(_: argparse.Namespace) -> None:
     console.print(table)
 
 
+def cmd_token(args: argparse.Namespace) -> None:
+    cmd = getattr(args, "token_command", None)
+    if not cmd:
+        console.print("[danger]Usage: tod token <set|clear|status>[/danger]")
+        return
+
+    if cmd == "set":
+        token = args.token
+        if not token:
+            token = Prompt.ask("[bold cyan]Paste Todoist API token[/]", password=True)
+        try:
+            _wcm_write_token(token, overwrite=getattr(args, "force", False))
+            console.print(f"[success]Stored token in Windows Credential Manager as '{_wcm_target_name()}'.[/success]")
+        except Exception as exc:
+            console.print(f"[danger]{exc}[/danger]")
+    elif cmd == "clear":
+        if _wcm_delete_token():
+            console.print(f"[success]Deleted token '{_wcm_target_name()}'.[/success]")
+        else:
+            console.print(f"[warning]No stored token found for '{_wcm_target_name()}'.[/warning]")
+    elif cmd == "status":
+        env_set = bool(_normalize_token(os.getenv("TODOIST_API_TOKEN") or os.getenv("TODOIST_TOKEN")))
+        wcm_set = bool(_wcm_read_token())
+        console.print(f"Env token set: {'yes' if env_set else 'no'}")
+        console.print(f"WCM token set: {'yes' if wcm_set else 'no'} ({_wcm_target_name()})")
+        if not env_set and not wcm_set:
+            console.print("[warning]No token configured. Run `tod token set`.[/warning]")
+    else:
+        console.print("[danger]Unknown token command. Use set|clear|status.[/danger]")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Todoist CLI (Rich)")
     parser.add_argument("--token", help="Todoist API token (overrides discovery)")
@@ -370,9 +552,20 @@ def main() -> None:
 
     list_p.set_defaults(func=cmd_list)
 
+    token_p = subparsers.add_parser("token", help="Manage stored Todoist API token")
+    token_sub = token_p.add_subparsers(dest="token_command")
+    token_set = token_sub.add_parser("set", help="Store token in Windows Credential Manager")
+    token_set.add_argument("--token", help="Token value")
+    token_set.add_argument("--force", action="store_true", help="Overwrite existing stored token")
+    token_sub.add_parser("clear", help="Delete stored token from Windows Credential Manager")
+    token_sub.add_parser("status", help="Show whether a token is configured")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
+        return
+    if args.command == "token":
+        cmd_token(args)
         return
     if hasattr(args, "func"):
         try:
@@ -383,6 +576,12 @@ def main() -> None:
             console.print(f"[danger]Unhandled error: {exc}[/danger]")
     else:
         parser.print_help()
+
+    token_set = token_sub.add_parser("set", help="Store token in Windows Credential Manager")
+    token_set.add_argument("--token", help="Token value")
+    token_set.add_argument("--force", action="store_true", help="Overwrite existing stored token")
+    token_sub.add_parser("clear", help="Delete stored token from Windows Credential Manager")
+    token_sub.add_parser("status", help="Show whether a token is configured")
 
 
 if __name__ == "__main__":
