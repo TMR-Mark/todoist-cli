@@ -22,12 +22,19 @@ SYNC_BASE_URL = os.getenv("TODOIST_SYNC_API", "https://api.todoist.com/sync/v9")
 TOKEN_ENV_VARS = ["TODOIST_API_TOKEN", "TODOIST_TOKEN"]
 
 TODOIST = {
-    "red":        "#DE483A",
+    "red":        "#D44A4A",
     "zeus":       "#25221E",
     "fantasy":    "#FEFDFC",
     "frost":      "#F0F6DF",
     "white":      "#FFFFFF",
     "gray":       "#A1A1A1",
+}
+
+PRIORITY_COLORS = {
+    1: TODOIST["red"],
+    2: "#FF8C00",
+    3: "#1E90FF",
+    4: TODOIST["gray"],
 }
 
 custom_theme = Theme({
@@ -260,6 +267,8 @@ def _format_date(date_str: Optional[str]) -> str:
         return "----"
     try:
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        if dt.tzinfo:
+            dt = dt.astimezone().replace(tzinfo=None)
         return dt.strftime("%Y-%m-%d")
     except Exception:
         return date_str
@@ -270,13 +279,33 @@ def _format_time(date_str: Optional[str]) -> str:
         return ""
     try:
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        if dt.tzinfo:
+            dt = dt.astimezone()
         return dt.strftime("%I:%M %p")
     except Exception:
         return ""
 
 
+def _priority_text(priority: Optional[int]) -> Text:
+    level = priority or 1
+    color = PRIORITY_COLORS.get(level, PRIORITY_COLORS[1])
+    return Text(str(level), style=color)
+
+
 def _due_string_has_time(value: str) -> bool:
-    return bool(re.search(r"\b(?:AM|PM)\b", value, re.IGNORECASE))
+    """Return True if the due string already contains an explicit time.
+
+    Covers formats like "10:30", "10:30pm", "10 pm", "10pm", etc., to avoid
+    appending the parsed datetime twice.
+    """
+    time_patterns = [
+        r"\d{1,2}:\d{2}\s*(?:am|pm)?",  # 10:30 or 10:30pm
+        r"\d{1,2}\s*(?:am|pm)",         # 10am or 10 am
+    ]
+    for pat in time_patterns:
+        if re.search(pat, value, re.IGNORECASE):
+            return True
+    return False
 
 
 def _handle_response(response: requests.Response) -> Optional[dict]:
@@ -341,7 +370,7 @@ def _print_tasks(tasks: list[dict], title: str = "Tasks") -> None:
     table.add_column("Content", style="text", overflow="fold")
     table.add_column("Project", width=20)
     table.add_column("Due", style="dim", no_wrap=True)
-    table.add_column("Priority", justify="center", width=9, style="warning")
+    table.add_column("Priority", justify="center", width=9)
 
     for idx, task in enumerate(tasks, 1):
         project = task.get("project_id")
@@ -362,13 +391,14 @@ def _print_tasks(tasks: list[dict], title: str = "Tasks") -> None:
         else:
             due_display = due_str
         content = Text(str(task.get("content", "")))
+        priority_display = _priority_text(task.get("priority"))
         table.add_row(
             str(idx),
             str(task.get("id")),
             content,
             project_name,
             due_display,
-            str(task.get("priority", 1)),
+            priority_display,
         )
     console.print(table)
 
@@ -596,17 +626,24 @@ def _filter_tasks_by_project_name(tasks: list[dict], project_name: str) -> tuple
 
 def _get_due_day_key(task: dict) -> Optional[str]:
     due = task.get("due") or {}
+    dt_value = due.get("datetime")
+    if dt_value:
+        try:
+            parsed = datetime.fromisoformat(dt_value.replace("Z", "+00:00"))
+            if parsed.tzinfo:
+                parsed = parsed.astimezone()
+            return parsed.date().isoformat()
+        except Exception:
+            pass
+
     date = due.get("date")
     if date:
-        return date
-    dt_value = due.get("datetime")
-    if not dt_value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(dt_value.replace("Z", "+00:00"))
-        return parsed.date().isoformat()
-    except Exception:
-        return None
+        try:
+            parsed_date = datetime.fromisoformat(date.replace("Z", "+00:00")).date()
+            return parsed_date.isoformat()
+        except Exception:
+            return date
+    return None
 
 
 def _group_tasks_by_due_date(tasks: list[dict]) -> dict[Optional[str], list[dict]]:
@@ -651,11 +688,59 @@ def cmd_upcoming(args: argparse.Namespace) -> None:
         console.print("[warning]No upcoming tasks with a due date found.[/warning]")
         return
 
-    for due_key in ordered_dates:
+    table = Table(
+        title="Upcoming Tasks",
+        title_style="title",
+        box=BOX_STYLE,
+        show_header=True,
+        header_style="header",
+        border_style="border",
+    )
+    table.add_column("#", justify="right", width=4, style="dim", header_style="header")
+    table.add_column("Due", style="dim", no_wrap=True, header_style="header")
+    table.add_column("Content", style="text", overflow="fold", header_style="header")
+    table.add_column("Project", width=20, header_style="header")
+    table.add_column("Priority", justify="center", width=9, header_style="header")
+    table.add_column("ID", width=10, header_style="header")
+
+    row_idx = 1
+    for group_index, due_key in enumerate(ordered_dates):
         entries = groups[due_key]
         entries.sort(key=_due_sort_value)
-        label = _format_date(due_key)
-        _print_tasks(entries, title=f"Upcoming: {label}")
+
+        date_label = _format_date(due_key)
+        content_lines: list[Text] = []
+        project_lines: list[str] = []
+        priority_lines: list[Text] = []
+        id_lines: list[str] = []
+
+        for task in entries:
+            project = task.get("project_id")
+            project_name = _get_project_name(project)
+            due = task.get("due") or {}
+
+            time_part = _format_time(due.get("datetime")) if due.get("datetime") else ""
+            content_text = Text(str(task.get("content", "")))
+            if time_part:
+                content_text.append(f"  {time_part}", style="dim")
+
+            content_lines.append(content_text)
+            project_lines.append(project_name)
+            priority_lines.append(_priority_text(task.get("priority")))
+            id_lines.append(str(task.get("id")))
+
+        table.add_row(
+            str(row_idx),
+            date_label,
+            Text("\n").join(content_lines),
+            "\n".join(project_lines),
+            Text("\n").join(priority_lines),
+            "\n".join(id_lines),
+            end_section=(group_index != len(ordered_dates) - 1),
+        )
+        row_idx += 1
+
+    console.print(table)
 
 
 def cmd_project_by_name(project_name: str, token: Optional[str]) -> None:
@@ -677,9 +762,34 @@ def cmd_complete(args: argparse.Namespace) -> None:
     if not args.task_id:
         console.print("[danger]Usage: tod complete <task-id>[/danger]")
         return
+
+    task_id = args.task_id
+
+    # Allow small numeric ordinals to close inbox tasks by position (matching `tod inbox` ordering).
+    if task_id.isdigit() and len(task_id) <= 3:
+        ordinal = int(task_id)
+        if ordinal < 1:
+            console.print("[danger]Task number must be 1 or greater.[/danger]")
+            return
+        all_tasks = _fetch_tasks({}, args.token)
+        if all_tasks is None:
+            return
+        inbox_tasks, _ = _filter_tasks_by_project_name(all_tasks, "Inbox")
+        inbox_tasks.sort(key=_due_sort_value)
+        if ordinal > len(inbox_tasks):
+            console.print(
+                f"[danger]Inbox only has {len(inbox_tasks)} task(s); cannot complete #{ordinal}.[/danger]"
+            )
+            return
+        task_obj = inbox_tasks[ordinal - 1]
+        task_id = str(task_obj.get("id"))
+        console.print(
+            f"[dim]Completing inbox task #{ordinal}: ID {task_id} — {task_obj.get('content','')}[/dim]"
+        )
+
     try:
         response = requests.post(
-            f"{DEFAULT_BASE_URL}/tasks/{args.task_id}/close",
+            f"{DEFAULT_BASE_URL}/tasks/{task_id}/close",
             headers=_get_headers(args.token),
             timeout=10,
         )
@@ -687,7 +797,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
         console.print(f"[danger]Error closing task: {exc}[/danger]")
         return
     if response.status_code == 204:
-        console.print(f"[success]Completed task {args.task_id}.[/success]")
+        console.print(f"[success]Completed task {task_id}.[/success]")
     else:
         _handle_response(response)
 
